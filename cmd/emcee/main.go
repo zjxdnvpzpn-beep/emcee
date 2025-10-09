@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -97,7 +98,22 @@ Authentication values can be provided directly or as 1Password secret references
 				}
 
 				// Make HTTP request
-				resp, err := http.DefaultClient.Do(req)
+				client := http.DefaultClient
+				if insecure {
+					if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+						transport := base.Clone()
+						if transport.TLSClientConfig == nil {
+							transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+						} else {
+							transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+							transport.TLSClientConfig.InsecureSkipVerify = true
+						}
+						client = &http.Client{Transport: transport}
+					} else {
+						client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+					}
+				}
+				resp, err := client.Do(req)
 				if err != nil {
 					return fmt.Errorf("error downloading spec: %w", err)
 				}
@@ -144,7 +160,13 @@ Authentication values can be provided directly or as 1Password secret references
 			}
 
 			// Build HTTP client with optional auth header
-			client, err := internal.RetryableClient(retries, timeout, rps, logger)
+			client, err := internal.RetryableClient(internal.RetryableClientOptions{
+				Retries:  retries,
+				Timeout:  timeout,
+				RPS:      rps,
+				Logger:   logger,
+				Insecure: insecure,
+			})
 			if err != nil {
 				return fmt.Errorf("error creating client: %w", err)
 			}
@@ -213,9 +235,10 @@ var (
 	basicAuth  string
 	rawAuth    string
 
-	retries int
-	timeout time.Duration
-	rps     int
+	retries  int
+	timeout  time.Duration
+	rps      int
+	insecure bool
 
 	verbose       bool
 	silent        bool
@@ -235,6 +258,7 @@ func init() {
 	rootCmd.Flags().IntVar(&retries, "retries", 3, "Maximum number of retries for failed requests")
 	rootCmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second, "HTTP request timeout")
 	rootCmd.Flags().IntVarP(&rps, "rps", "r", 0, "Maximum requests per second (0 for no limit)")
+	rootCmd.Flags().BoolVar(&insecure, "insecure", false, "Allow insecure TLS connections (skip certificate verification)")
 
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug level logging to stderr")
 	rootCmd.Flags().BoolVarP(&silent, "silent", "s", false, "Disable all logging")

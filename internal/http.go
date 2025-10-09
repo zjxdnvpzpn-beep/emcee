@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
@@ -28,29 +29,53 @@ func (t *HeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return base.RoundTrip(req)
 }
 
-// RetryableClient returns a new http.Client with a retryablehttp.Client
-// configured with the provided parameters.
-func RetryableClient(retries int, timeout time.Duration, rps int, logger interface{}) (*http.Client, error) {
-	if retries < 0 {
+// RetryableClientOptions configures the retryable HTTP client.
+type RetryableClientOptions struct {
+	Retries  int
+	Timeout  time.Duration
+	RPS      int
+	Logger   interface{}
+	Insecure bool
+}
+
+// RetryableClient returns a new http.Client with a retryablehttp.Client configured per opts.
+func RetryableClient(opts RetryableClientOptions) (*http.Client, error) {
+	if opts.Retries < 0 {
 		return nil, fmt.Errorf("retries must be greater than 0")
 	}
-	if timeout < 0 {
+	if opts.Timeout < 0 {
 		return nil, fmt.Errorf("timeout must be greater than 0")
 	}
-	if rps < 0 {
+	if opts.RPS < 0 {
 		return nil, fmt.Errorf("rps must be greater than 0")
 	}
 
 	retryClient := retryablehttp.NewClient()
-	retryClient.RetryMax = retries
+	retryClient.RetryMax = opts.Retries
 	retryClient.RetryWaitMin = 1 * time.Second
 	retryClient.RetryWaitMax = 30 * time.Second
-	retryClient.HTTPClient.Timeout = timeout
-	retryClient.Logger = logger
-	if rps > 0 {
+	retryClient.HTTPClient.Timeout = opts.Timeout
+	retryClient.Logger = opts.Logger
+	if opts.Insecure {
+		// Clone the default transport to preserve defaults (pooling, timeouts, proxies), then override TLS.
+		if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+			transport := base.Clone()
+			if transport.TLSClientConfig == nil {
+				transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			} else {
+				transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+				transport.TLSClientConfig.InsecureSkipVerify = true
+			}
+			retryClient.HTTPClient.Transport = transport
+		} else {
+			// Fallback: construct a new transport if default transport type is unexpected.
+			retryClient.HTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		}
+	}
+	if opts.RPS > 0 {
 		retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
 			// Ensure we wait at least 1/rps between requests
-			minWait := time.Second / time.Duration(rps)
+			minWait := time.Second / time.Duration(opts.RPS)
 			if min < minWait {
 				min = minWait
 			}
